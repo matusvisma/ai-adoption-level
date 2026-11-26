@@ -53,9 +53,17 @@ python <this skill folder>/scripts/collect_evidence.py --days 30
 
 It finds every repository that had a session in the window, so there is no
 need to list them (`--repo` narrows it). The output has the same measures for
-all sessions (`all_repos`) and for each repository (`by_repo`), a
-`parallel_work` block, the fifteen largest sessions, the Claude Code
-configuration, and git history per repository. Things to know about it:
+all sessions (`all_repos`), for each repository (`by_repo`) and for each
+Claude Code config folder (`by_config_dir`), a `parallel_work` block, the
+fifteen largest sessions, the Claude Code setup, and git history per
+repository. Things to know about it:
+
+- People with more than one Claude Code seat usually keep one config folder
+  per seat. The collector reads the default folder and any sibling that looks
+  like one (`~/.claude-work` and similar), and lists what it read in
+  `config_dirs`. A folder elsewhere is read only when passed with
+  `--config-dir <path>`; the flag can be repeated, and once it is used, name
+  every folder that should count.
 
 - Most numbers are about **working sessions**: sessions that changed files,
   committed, or handed work to subagents. Sessions that only answered a
@@ -86,17 +94,35 @@ self-report and will carry lower confidence. If past conversations are
 searchable, look at recent engineering ones for how tasks were handed over.
 Then run the interview in full.
 
-## Step 2: Settle the scope, then interview
+## Step 2: Check coverage and scope, then interview
 
-**Scope first.** People often work differently in a small project of their
+**Coverage first.** Before interpreting anything, show the person the config
+folders and repositories the collector found, with session counts, and ask
+what is missing: another seat or config folder, WSL or a container, another
+machine. Missing work can change the level, so treat an answer like "I also
+use another Claude config" as something to go and read, not as a caveat to
+write down:
+
+- **Another folder reachable from here** (a second seat, WSL, a mounted
+  drive): ask for its path, check it has a `projects/` folder, and rerun the
+  collector with `--config-dir` for it and for each folder already found.
+- **Another machine:** ask them to run the collector there and bring the
+  output back (`python collect_evidence.py > evidence-<machine>.json`), then
+  assess both files together. If they would rather not do that now, carry on.
+- **Only if it cannot be read:** ask what share of their work runs there and
+  how they work in it, list it under "Not visible", and lower the confidence.
+  If it is a large share, call the level provisional.
+
+**Then scope.** People often work differently in a small project of their
 own than in their employer's main codebase: a new, small repository is far
 easier to delegate in. Show the repositories found and ask which are their
 main work. The working level is decided on those. Other repositories (side
 projects, experiments, hackathons) are reported in their own line and count
 toward reach. If the person says everything is main work, treat it so.
 
-**Then the interview.** Local transcripts miss other tools (Copilot,
-Cursor), other machines, and agents that run in the cloud or in CI. Ask about
+**Then the interview.** Even with every config folder read, local
+transcripts miss other tools (Copilot, Cursor) and agents that run in the
+cloud or in CI. Ask about
 those, and about anything the evidence left ambiguous. Keep it to five
 questions at most, skip any the evidence already answers, and ask for recent
 concrete instances rather than self-ratings, because "do you delegate to
@@ -221,7 +247,7 @@ screen. Use this structure:
 **Outside main work:** <Level seen in side projects, or "nothing separate".>
 **Reach:** Level M. <What they did at that level, and how often.>
 **Confidence:** high | medium | low. <What it rests on.>
-**Based on:** last <D> days, <S> working sessions across <R> repos, <other sources>.
+**Based on:** last <D> days, <S> working sessions across <R> repos, <config folders and machines read>, <other sources>.
 
 ## Evidence
 | Level | Status | Strongest evidence |

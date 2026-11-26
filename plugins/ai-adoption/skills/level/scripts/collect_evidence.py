@@ -5,13 +5,19 @@ Read-only. Nothing is written, sent or modified; the summary is printed as
 JSON on stdout. Only the standard library is used.
 
 Usage:
-    python collect_evidence.py [--days 30] [--repo PATH ...] [--no-samples]
+    python collect_evidence.py [--days 30] [--config-dir PATH ...] [--repo PATH ...] [--no-samples]
+
+People with more than one Claude Code seat often keep one config folder per
+seat. Without --config-dir, the default folder and every sibling that looks
+like one (~/.claude-work and so on) are read. Pass --config-dir once per
+folder to name them yourself, for example for a folder somewhere else.
 
 Without --repo, every repository that had a session in the window is
 inspected, so there is normally no need to list them.
 
 Sources:
-    * session transcripts under <config>/projects/<project>/<session>.jsonl
+    * session transcripts under <config>/projects/<project>/<session>.jsonl,
+      for every config folder found or given
     * Claude Code configuration (user level and per repo)
     * subagent transcripts under <config>/projects/<project>/<session>/subagents/
     * git history, worktrees and CI files of each repository
@@ -23,6 +29,7 @@ transcripts exist), open one transcript and compare it with parse_session().
 import argparse
 import json
 import os
+import platform
 import re
 import statistics
 import subprocess
@@ -279,6 +286,7 @@ def summarise_sessions(sessions, samples):
         files = len(s["files_edited"] | s["subagent_files_edited"])
         rows.append({
             "date": datetime.fromtimestamp(s["start"], timezone.utc).strftime("%Y-%m-%d"),
+            "config_dir": s["config_dir"],
             "repo": repo_root(s["cwd"]) if s["cwd"] else s["project_dir"],
             "cwd": s["cwd"] or s["project_dir"],
             "branches": sorted(s["branches"])[:3],
@@ -314,14 +322,17 @@ def summarise_sessions(sessions, samples):
             places[rows[i]["repo"]].add((rows[i]["cwd"], tuple(rows[i]["branches"])))
         same_repo += any(len(v) >= 2 for v in places.values())
 
-    by_repo = defaultdict(list)
+    by_repo, by_config = defaultdict(list), defaultdict(list)
     for r in rows:
         by_repo[r["repo"]].append(r)
+        by_config[r["config_dir"]].append(r)
     top = sorted(rows, key=lambda r: r["tool_calls"], reverse=True)[:15]
     return {
         "active_days": len({r["date"] for r in rows}),
         "all_repos": profile(rows),
         "by_repo": {repo: profile(group) for repo, group in sorted(by_repo.items(), key=lambda kv: -len(kv[1]))},
+        "by_config_dir": {c: {**profile(group), "repos": sorted({r["repo"] for r in group})}
+                          for c, group in by_config.items()},
         "parallel_work": {
             "days_with_parallel_sessions": len(parallel_days),
             "ten_minute_windows_with_2_plus_sessions": sum(1 for m in per_bin.values() if len(m) >= 2),
@@ -417,32 +428,82 @@ def repo_evidence(repo, days):
     }
 
 
+def has_sessions(path):
+    return (path / "projects").is_dir()
+
+
+def discover_config_dirs():
+    """Every Claude Code config folder on this machine that holds sessions.
+
+    One seat usually means one folder, selected with CLAUDE_CONFIG_DIR. People
+    name them freely, so look for anything shaped like one next to the default.
+    """
+    home = Path.home()
+    found = [Path(os.environ["CLAUDE_CONFIG_DIR"]).expanduser()] if os.environ.get("CLAUDE_CONFIG_DIR") else []
+    found.append(home / ".claude")
+    patterns = [(home, ".claude*"), (home, ".config/claude*")]
+    windows_users = Path("/mnt/c/Users")  # the Windows side, when running inside WSL
+    if windows_users.is_dir():
+        patterns.append((windows_users, "*/.claude*"))
+    for base, pattern in patterns:
+        try:
+            found += sorted(p for p in base.glob(pattern) if p.is_dir())
+        except OSError:
+            pass
+    unique = {}
+    for path in found:
+        try:
+            if has_sessions(path):
+                unique.setdefault(str(path.resolve()), path)
+        except OSError:
+            pass
+    return list(unique.values())
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=30, help="look-back window (default 30)")
     ap.add_argument("--repo", action="append", default=[],
                     help="repository to inspect; repeatable (default: every repository with sessions)")
-    ap.add_argument("--config-dir", default=os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude"))
+    ap.add_argument("--config-dir", action="append", default=[],
+                    help="Claude Code config folder to read; repeatable (default: every folder found)")
     ap.add_argument("--no-samples", action="store_true", help="leave prompt text out of the output")
     args = ap.parse_args()
 
-    config = Path(args.config_dir).expanduser()
+    configs = [Path(c).expanduser() for c in args.config_dir] or discover_config_dirs()
     cutoff = time.time() - args.days * 86400
-    files = [p for p in (config / "projects").glob("*/*.jsonl") if p.stat().st_mtime >= cutoff] \
-        if (config / "projects").is_dir() else []
-    sessions = [s for s in map(parse_session, files) if s and s["end"] >= cutoff]
-    # Sessions with no tool calls and no prompts are empty shells (opened and closed).
-    sessions = [s for s in sessions if s["prompts"] or s["tools"]]
+    sessions, config_report, seen_files = [], [], set()
+    for config in configs:
+        files = [p for p in (config / "projects").glob("*/*.jsonl") if p.stat().st_mtime >= cutoff] \
+            if has_sessions(config) else []
+        kept = 0
+        for path in files:
+            if path.name in seen_files:  # the same session copied into two folders
+                continue
+            s = parse_session(path)
+            # Sessions with no tool calls and no prompts are empty shells (opened and closed).
+            if s and s["end"] >= cutoff and (s["prompts"] or s["tools"]):
+                seen_files.add(path.name)
+                s["config_dir"] = str(config)
+                sessions.append(s)
+                kept += 1
+        config_report.append({
+            "path": str(config), "found": has_sessions(config),
+            "transcript_files_in_window": len(files), "sessions_in_window": kept,
+            "setup": inventory(config),
+        })
 
     usage, seen = summarise_sessions(sessions, samples=not args.no_samples)
     repos = args.repo or [r for r in seen if Path(r).is_dir()][:20] or ["."]
     result = {
         "window_days": args.days,
         "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-        "transcript_files_in_window": len(files),
-        "note": "Transcripts are deleted after a retention period, so a long window may be incomplete.",
+        "machine": platform.node(),
+        "config_dirs": config_report,
+        "note": "Transcripts are deleted after a retention period, so a long window may be incomplete. "
+                "Only config folders listed in config_dirs were read; a seat kept in a folder elsewhere, "
+                "in WSL or on another machine needs --config-dir or its own run.",
         "usage": usage,
-        "user_config": inventory(config),
         "repos": [repo_evidence(Path(r).expanduser(), args.days) for r in repos],
     }
     if hasattr(sys.stdout, "reconfigure"):

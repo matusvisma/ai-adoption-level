@@ -1,0 +1,14 @@
+{
+  "name": "ai-adoption-tools",
+  "description": "Tools for checking and growing AI adoption in engineering work",
+  "owner": {
+    "name": "Matus"
+  },
+  "plugins": [
+    {
+      "name": "ai-adoption",
+      "source": "./plugins/ai-adoption",
+      "description": "Check which AI adoption level you work at, with evidence and next steps"
+    }
+  ]
+}

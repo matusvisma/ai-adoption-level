@@ -1,0 +1,7 @@
+{
+  "name": "ai-adoption",
+  "description": "Check which AI adoption level (1 Assistance to 4 Orchestration) you actually work at, from your real Claude Code usage.",
+  "author": {
+    "name": "Matus"
+  }
+}

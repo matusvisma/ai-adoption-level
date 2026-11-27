@@ -64,6 +64,10 @@ repository. Things to know about it:
   `config_dirs`. A folder elsewhere is read only when passed with
   `--config-dir <path>`; the flag can be repeated, and once it is used, name
   every folder that should count.
+- Commits count as the person's own when the author matches their
+  configured git `user.name` or `user.email`. If they also commit under
+  another name or address, rerun with `--author <name or email>`
+  (repeatable).
 
 - Most numbers are about **working sessions**: sessions that changed files,
   committed, or handed work to subagents. Sessions that only answered a

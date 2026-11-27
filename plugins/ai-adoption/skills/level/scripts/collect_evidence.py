@@ -242,14 +242,15 @@ _ROOTS = {}
 def repo_root(cwd):
     """Main repository of a working directory, so worktrees group with their repo."""
     if cwd not in _ROOTS:
-        root = cwd
+        root, resolved = cwd, False
         if cwd and Path(cwd).is_dir():
             common = git(cwd, "rev-parse", "--git-common-dir").strip()
             if common:
                 p = Path(common) if Path(common).is_absolute() else Path(cwd) / common
                 p = p.resolve()
                 root = str(p.parent if p.name == ".git" else p)
-        if cwd and root == cwd:
+                resolved = True
+        if cwd and not resolved:
             # Git could not tell (the worktree may be gone): fall back to the path.
             head = WORKTREE_PATH_RE.split(cwd, maxsplit=1)
             if len(head) == 2:

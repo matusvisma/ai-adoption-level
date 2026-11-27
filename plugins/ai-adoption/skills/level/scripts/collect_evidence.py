@@ -5,7 +5,8 @@ Read-only. Nothing is written, sent or modified; the summary is printed as
 JSON on stdout. Only the standard library is used.
 
 Usage:
-    python collect_evidence.py [--days 30] [--config-dir PATH ...] [--repo PATH ...] [--no-samples]
+    python collect_evidence.py [--days 30] [--config-dir PATH ...] [--repo PATH ...]
+                               [--author NAME_OR_EMAIL ...] [--no-samples]
 
 People with more than one Claude Code seat often keep one config folder per
 seat. Without --config-dir, the default folder and every sibling that looks
@@ -27,6 +28,7 @@ defensively; if the numbers look wrong (for example zero sessions although
 transcripts exist), open one transcript and compare it with parse_session().
 """
 import argparse
+import bisect
 import getpass
 import json
 import os
@@ -50,7 +52,21 @@ AI_TRAILER_RE = re.compile(
     r"co-authored-by:.*\b(claude|copilot|cursor|codex|devin|aider)\b|generated with.*claude",
     re.IGNORECASE,
 )
-NOISE_PREFIXES = ("<local-command", "<system-reminder", "<bash-", "Caveat:", "<task-notification")
+# `git commit`, also with options before the subcommand (`git -C <path> commit`), not `git commit-tree`.
+GIT_COMMIT_RE = re.compile(
+    r"\bgit(?:\s+(?:-[cC]\s+(?:\"[^\"]*\"|'[^']*'|\S+)|--[\w-]+(?:=\S+)?))*\s+commit(?![\w-])")
+PR_COMMAND_RE = re.compile(r"\b(gh pr create|az repos pr create|glab mr create)\b")
+# MCP tools that open a pull or merge request, such as mcp__github__create_pull_request.
+MCP_PR_TOOL_RE = re.compile(
+    r"create[_-]?(pull[_-]?request|merge[_-]?request|pr)$|(pull[_-]?request|merge[_-]?request|pr)[_-]?create$",
+    re.IGNORECASE,
+)
+# Worktrees that tools create inside the repository. Once a worktree is removed, git can no
+# longer say which repository it belonged to, but its path still does.
+WORKTREE_PATH_RE = re.compile(r"[\\/](?:\.claude[\\/]worktrees|\.worktrees)[\\/]")
+NOISE_PREFIXES = ("<local-command", "<system-reminder", "<bash-", "Caveat:", "<task-notification",
+                  # Compaction summary, for transcripts written before it carried isCompactSummary.
+                  "This session is being continued from a previous conversation")
 BIN_SECONDS = 600  # two sessions count as parallel when both act in the same 10 minutes
 
 
@@ -64,6 +80,9 @@ def parse_ts(value):
 def human_text(entry):
     """Text of a message the person typed, or None for tool results and noise."""
     if entry.get("type") != "user" or entry.get("isSidechain") or entry.get("isMeta"):
+        return None
+    # Compaction summaries are written as user messages, but nobody typed them.
+    if entry.get("isCompactSummary") or entry.get("isVisibleInTranscriptOnly"):
         return None
     content = (entry.get("message") or {}).get("content")
     if isinstance(content, str):
@@ -87,7 +106,8 @@ def parse_session(path):
         "longest_run": 0, "first_prompt": None, "bins": set(), "sidechain_tool_calls": 0,
         "opened_with_command": None, "per_turn_subagents": Counter(),
     }
-    run = 0
+    # Tool calls between human messages, keyed by how many human messages came before them.
+    runs, prompt_times = Counter(), []
     try:
         handle = path.open(encoding="utf-8", errors="replace")
     except OSError:
@@ -120,8 +140,8 @@ def parse_session(path):
                         s["opened_with_command"] = m.group(1) if m else "?"
                 elif not text.startswith(NOISE_PREFIXES):
                     s["prompts"] += 1
-                    s["longest_run"] = max(s["longest_run"], run)
-                    run = 0
+                    if ts:
+                        prompt_times.append(ts)
                     if s["first_prompt"] is None:
                         s["first_prompt"] = text
                 continue
@@ -135,14 +155,15 @@ def parse_session(path):
             for b in content if isinstance(content, list) else []:
                 if not isinstance(b, dict) or b.get("type") != "tool_use":
                     continue
+                # Agent work without a human message in between, subagents included.
+                runs[s["prompts"]] += 1
+                if ts:
+                    s["bins"].add(int(ts // BIN_SECONDS))
                 if e.get("isSidechain"):
                     s["sidechain_tool_calls"] += 1
                     continue
                 name, inp = str(b.get("name", "?")), b.get("input") or {}
                 s["tools"]["mcp__*" if name.startswith("mcp__") else name] += 1
-                run += 1
-                if ts:
-                    s["bins"].add(int(ts // BIN_SECONDS))
                 if name in EDIT_TOOLS:
                     s["files_edited"].add(inp.get("file_path") or inp.get("notebook_path") or "?")
                 elif name in SUBAGENT_TOOLS:
@@ -155,21 +176,28 @@ def parse_session(path):
                 elif name == "Bash":
                     cmd = str(inp.get("command", ""))
                     s["tests_run"] += bool(TEST_RE.search(cmd))
-                    s["commits"] += "git commit" in cmd
-                    s["prs_created"] += bool(re.search(r"\b(gh pr create|az repos pr create)\b", cmd))
+                    s["commits"] += bool(GIT_COMMIT_RE.search(cmd))
+                    s["prs_created"] += bool(PR_COMMAND_RE.search(cmd))
                     s["worktree_cmds"] += "git worktree" in cmd
-    s["longest_run"] = max(s["longest_run"], run)
-    s.update(scan_subagents(path.parent / path.stem / "subagents"))
+                elif name.startswith("mcp__"):
+                    s["prs_created"] += bool(MCP_PR_TOOL_RE.search(name))
+    subagents = scan_subagents(path.parent / path.stem / "subagents")
+    prompt_times.sort()
+    for t in subagents.pop("tool_times"):
+        runs[bisect.bisect_right(prompt_times, t)] += 1
+        s["bins"].add(int(t // BIN_SECONDS))
+    s["longest_run"] = max(runs.values(), default=0)
+    s.update(subagents)
     return s if s["start"] else None
 
 
 def scan_subagents(directory):
-    """When each subagent of a session ran, and which files subagents edited.
+    """When each subagent of a session ran, when it called tools, and which files it edited.
 
     Work done by subagents is not in the main transcript, so a session that
     delegates everything would otherwise look like it edited nothing.
     """
-    spans, files = [], set()
+    spans, files, tool_times = [], set(), []
     for path in directory.glob("*.jsonl") if directory.is_dir() else []:
         first = last = None
         try:
@@ -189,7 +217,11 @@ def scan_subagents(directory):
                     first, last = (ts if first is None else min(first, ts)), (ts if last is None else max(last, ts))
                 content = (e.get("message") or {}).get("content")
                 for b in content if isinstance(content, list) else []:
-                    if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in EDIT_TOOLS:
+                    if not isinstance(b, dict) or b.get("type") != "tool_use":
+                        continue
+                    if ts:
+                        tool_times.append(ts)
+                    if b.get("name") in EDIT_TOOLS:
                         inp = b.get("input") or {}
                         files.add(inp.get("file_path") or inp.get("notebook_path") or "?")
         if first is not None:
@@ -200,7 +232,8 @@ def scan_subagents(directory):
     for _, step in events:
         live += step
         peak = max(peak, live)
-    return {"subagent_transcripts": len(spans), "max_concurrent_subagents": peak, "subagent_files_edited": files}
+    return {"subagent_transcripts": len(spans), "max_concurrent_subagents": peak, "subagent_files_edited": files,
+            "tool_times": tool_times}
 
 
 _ROOTS = {}
@@ -216,6 +249,11 @@ def repo_root(cwd):
                 p = Path(common) if Path(common).is_absolute() else Path(cwd) / common
                 p = p.resolve()
                 root = str(p.parent if p.name == ".git" else p)
+        if cwd and root == cwd:
+            # Git could not tell (the worktree may be gone): fall back to the path.
+            head = WORKTREE_PATH_RE.split(cwd, maxsplit=1)
+            if len(head) == 2:
+                root = repo_root(head[0])
         _ROOTS[cwd] = root
     return _ROOTS[cwd]
 
@@ -327,6 +365,7 @@ def summarise_sessions(sessions, samples):
     for r in rows:
         by_repo[r["repo"]].append(r)
         by_config[r["config_dir"]].append(r)
+    activity = Counter({repo: len(group) for repo, group in by_repo.items()})
     top = sorted(rows, key=lambda r: r["tool_calls"], reverse=True)[:15]
     return {
         "active_days": len({r["date"] for r in rows}),
@@ -349,7 +388,7 @@ def summarise_sessions(sessions, samples):
         "skills_invoked": dict(sum((s["skills"] for s in sessions), Counter()).most_common(15)),
         "slash_commands": dict(sum((s["slash_commands"] for s in sessions), Counter()).most_common(15)),
         "largest_sessions": top,
-    }, sorted({r["repo"] for r in rows})
+    }, sorted(activity, key=lambda repo: (-activity[repo], repo))  # busiest first, for the repo cap
 
 
 def names(directory, pattern):
@@ -392,14 +431,27 @@ def git(repo, *args):
         return ""
 
 
-def repo_evidence(repo, days):
+def my_identities(root, extra=()):
+    """Names and emails whose commits count as the person's own.
+
+    The configured name catches commits made under another email (a no-reply
+    address, a second machine); `extra` adds identities git config does not know.
+    """
+    found = list(extra)
+    for key in ("user.name", "user.email"):
+        found += [git(root, "config", key).strip(), git(root, "config", "--global", key).strip()]
+    return sorted({f for f in found if f})
+
+
+def repo_evidence(repo, days, authors=()):
     root = git(repo, "rev-parse", "--show-toplevel").strip()
     if not root:
         return {"path": str(repo), "git": False}
     root = Path(root)
-    email = git(root, "config", "user.email").strip()
-    log = git(root, "log", "--all", f"--since={days} days ago", f"--author={email}",
-              "--pretty=format:%B%x1e") if email else ""
+    identities = my_identities(root, authors)
+    # Several --author options match any of them; -F and -i match each as plain, case-blind text.
+    log = git(root, "log", "--all", f"--since={days} days ago", "--fixed-strings", "--regexp-ignore-case",
+              *[f"--author={i}" for i in identities], "--pretty=format:%B%x1e") if identities else ""
     messages = [m for m in log.split("\x1e") if m.strip()]
     by_tool = Counter()
     for m in messages:
@@ -485,6 +537,9 @@ def main():
                     help="repository to inspect; repeatable (default: every repository with sessions)")
     ap.add_argument("--config-dir", action="append", default=[],
                     help="Claude Code config folder to read; repeatable (default: every folder found)")
+    ap.add_argument("--author", action="append", default=[],
+                    help="another name or email of yours in git history; repeatable "
+                         "(default: the configured git user.name and user.email)")
     ap.add_argument("--no-samples", action="store_true", help="leave prompt text out of the output")
     args = ap.parse_args()
 
@@ -492,8 +547,13 @@ def main():
     cutoff = time.time() - args.days * 86400
     sessions, config_report, seen_files = [], [], set()
     for config in configs:
-        files = [p for p in (config / "projects").glob("*/*.jsonl") if p.stat().st_mtime >= cutoff] \
-            if has_sessions(config) else []
+        files, unreadable = [], 0
+        for p in (config / "projects").glob("*/*.jsonl") if has_sessions(config) else []:
+            try:
+                if p.stat().st_mtime >= cutoff:
+                    files.append(p)
+            except OSError:  # locked, or deleted since the listing: skip it, do not abort the run
+                unreadable += 1
         kept = 0
         for path in files:
             if path.name in seen_files:  # the same session copied into two folders
@@ -508,6 +568,7 @@ def main():
         config_report.append({
             "path": str(config), "found": has_sessions(config),
             "transcript_files_in_window": len(files), "sessions_in_window": kept,
+            "unreadable_transcript_files": unreadable,
             "setup": inventory(config),
         })
 
@@ -523,7 +584,7 @@ def main():
                 "Only config folders listed in config_dirs were read; a seat kept in a folder elsewhere, "
                 "in WSL or on another machine needs --config-dir or its own run.",
         "usage": usage,
-        "repos": [repo_evidence(Path(r).expanduser(), args.days) for r in repos],
+        "repos": [repo_evidence(Path(r).expanduser(), args.days, args.author) for r in repos],
     }
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")

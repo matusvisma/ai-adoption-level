@@ -43,3 +43,12 @@ Enable auto-update.
 ## Change the level definitions
 
 Edit `plugins/ai-adoption/skills/level/references/levels.md` and push.
+
+## Test
+
+The evidence collector has tests built on synthetic transcripts. They use
+only the standard library. From the repository root:
+
+```
+python -m unittest discover -s tests
+```

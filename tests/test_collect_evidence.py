@@ -126,6 +126,13 @@ class WorktreeGroupingTest(TempDirTest):
                 with self.subTest(cwd=cwd):
                     self.assertEqual(ce.repo_root(cwd), base)
 
+    @unittest.skipUnless(shutil.which("git"), "git is not installed")
+    def test_existing_repository_under_a_worktree_folder_is_its_own_repository(self):
+        clone = self.tmp / "parent" / ".worktrees" / "other"
+        clone.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(clone)], check=True, capture_output=True)
+        self.assertEqual(Path(ce.repo_root(str(clone))).resolve(), clone.resolve())
+
     def test_removed_worktree_and_main_checkout_at_once_are_parallel_work_in_one_repo(self):
         repo = (self.tmp / "gone" / "repo").as_posix()
         worktree = repo + "/.claude/worktrees/feat-a"

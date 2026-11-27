@@ -94,9 +94,16 @@ self-report and will carry lower confidence. If past conversations are
 searchable, look at recent engineering ones for how tasks were handed over.
 Then run the interview in full.
 
-## Step 2: Check coverage and scope, then interview
+## Step 2: Confirm the name, check coverage and scope, then interview
 
-**Coverage first.** Before interpreting anything, show the person the config
+**Name first.** Every report must carry the full name of the person assessed,
+because reports from the whole team are collected and compared. The collector
+gives a guess in `employee` (git `user.name`, then the OS account). Show it
+and ask the person to confirm or correct it, in the same message as the
+coverage question below. If there is no guess, ask for their full name. Use
+the confirmed name exactly as given; do not run the report without one.
+
+**Coverage.** Before interpreting anything, show the person the config
 folders and repositories the collector found, with session counts, and ask
 what is missing: another seat or config folder, WSL or a container, another
 machine. Missing work can change the level, so treat an answer like "I also
@@ -240,8 +247,10 @@ Lead with the answer and keep the report in the conversation to about one
 screen. Use this structure:
 
 ```markdown
-# AI adoption level: Level N — <name>
+# AI adoption level: Level N — <level name>
 
+**Employee:** <full name, as confirmed in Step 2>
+**Assessed on:** <YYYY-MM-DD>
 **Working level:** Level N. <One sentence on why, in terms of how they work.>
 **Split in main work:** <Level by share of working sessions and of the work, and by repository where they differ.>
 **Outside main work:** <Level seen in side projects, or "nothing separate".>
@@ -278,7 +287,9 @@ At Level 4, replace the "separates you" section with where the orchestration
 is weakest.
 
 **Saving.** Offer to save the report as a dated markdown file so the next
-run can be compared against it. In the saved file only, add a "Key numbers"
+run can be compared against it. Name it
+`ai-adoption-level-<firstname-lastname>-<YYYY-MM-DD>.md` (lowercase, spaces
+as hyphens) and keep the Employee line at the top. In the saved file only, add a "Key numbers"
 table (working sessions, the intervention split, long runs, tests, PRs,
 subagent and parallel-work measures, AI-trailer share of commits, hooks, CI)
 and one line on scope: repositories counted as main work and the window. If
@@ -286,5 +297,6 @@ an earlier report exists in the place the user names, say what changed since.
 
 **Sharing.** The full report names repositories, tickets and details of the
 person's work. If they will pass the result to someone else, offer a short
-version instead: working level, split, reach, confidence and the key
-numbers, with no repository names, ticket numbers or prompt content.
+version instead: employee name, date, working level, split, reach,
+confidence and the key numbers, with no repository names, ticket numbers or
+prompt content. The employee name always stays in, in every version.

@@ -27,6 +27,7 @@ defensively; if the numbers look wrong (for example zero sessions although
 transcripts exist), open one transcript and compare it with parse_session().
 """
 import argparse
+import getpass
 import json
 import os
 import platform
@@ -428,6 +429,23 @@ def repo_evidence(repo, days):
     }
 
 
+def employee():
+    """Who ran this, so reports collected from many people can be told apart.
+
+    The git identity is the best local guess at a full name; the OS account is
+    the fallback. The skill confirms the name with the person before reporting.
+    """
+    try:
+        account = getpass.getuser()
+    except Exception:  # getuser raises various errors when no account name is set
+        account = ""
+    return {
+        "git_user_name": git(Path.home(), "config", "--global", "user.name").strip()
+                         or git(Path.cwd(), "config", "user.name").strip(),
+        "os_account": account,
+    }
+
+
 def has_sessions(path):
     return (path / "projects").is_dir()
 
@@ -498,6 +516,7 @@ def main():
     result = {
         "window_days": args.days,
         "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+        "employee": employee(),
         "machine": platform.node(),
         "config_dirs": config_report,
         "note": "Transcripts are deleted after a retention period, so a long window may be incomplete. "
